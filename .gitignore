@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+*.log
+*-key.json
+claude_gcp.json
+.dev.vars

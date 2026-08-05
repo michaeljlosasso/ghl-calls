@@ -1,0 +1,10 @@
+{
+  "name": "ghl-calls",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LL.Media inbound call log widget — embeds into the main dashboard",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  }
+}
