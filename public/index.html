@@ -179,20 +179,6 @@ body{
 .c-magenta{color:var(--ll-magenta)} .c-purple{color:var(--ll-purple)}
 .c-yellow{color:#d09f00}
 
-/* ---------------- chart ---------------- */
-.chart-wrap{position:relative;width:100%}
-svg{display:block;width:100%;height:auto;overflow:visible}
-.gridline{stroke:#eef0f2;stroke-width:1}
-.axis-txt{font-family:"Nunito";font-size:11px;font-weight:700;fill:var(--muted)}
-.tip{
-  position:absolute;pointer-events:none;background:#fff;border:1px solid var(--ll-border);
-  border-radius:10px;box-shadow:0 8px 22px rgba(25,23,24,.13);padding:9px 11px;
-  font-size:.82rem;font-weight:750;opacity:0;transition:opacity 120ms ease;
-  white-space:nowrap;z-index:5;
-}
-.tip .d{font-family:"Outfit";font-weight:800;font-size:.9rem;display:block;margin-bottom:3px}
-.tip .v{color:#0094aa;font-weight:850}
-
 /* ---------------- table ---------------- */
 .tbl-scroll{overflow:auto;margin:0 -18px;padding:0 18px}
 table{border-collapse:collapse;width:100%;font-size:.87rem;font-weight:700}
@@ -369,8 +355,7 @@ function render(){
     return;
   }
   const rows = filtered();
-  c.innerHTML = kpis(rows) + trend(rows) + table(rows);
-  wireChart(rows);
+  c.innerHTML = kpis(rows) + table(rows);
   wireTable();
 }
 
@@ -417,106 +402,6 @@ function fmtDur(s){
   if(!s) return "—";
   const m=Math.floor(s/60), r=s%60;
   return m ? `${m}m ${String(r).padStart(2,"0")}s` : `${r}s`;
-}
-
-function dailySeries(rows){
-  const by = new Map();
-  for(const r of rows) by.set(r[F.DATE], (by.get(r[F.DATE])||0)+1);
-  const out=[]; let d=parse(S.start), end=parse(S.end);
-  while(d<=end){ const k=iso(d); out.push({date:k, n:by.get(k)||0}); d=addDays(d,1); }
-  return out;
-}
-
-function trend(rows){
-  const pts = dailySeries(rows);
-  return `<div class="card" style="margin-top:14px">
-    <div class="eyebrow">Daily Volume</div>
-    <div class="card-h">Inbound calls per day</div>
-    <p class="card-sub">${fmtShort(S.start)} – ${fmtShort(S.end)} · Eastern Time</p>
-    <div class="chart-wrap" id="chartWrap" style="margin-top:14px">
-      ${pts.length ? chartSvg(pts) : '<div class="empty">No calls in this range.</div>'}
-      <div class="tip" id="tip"></div>
-    </div>
-  </div>`;
-}
-
-function chartSvg(pts){
-  const W=1000, H=260, L=44, R=16, T=14, B=30;
-  const iw=W-L-R, ih=H-T-B;
-  const max = Math.max(4, ...pts.map(p=>p.n));
-  const x = i => pts.length===1 ? L+iw/2 : L + (i/(pts.length-1))*iw;
-  const y = v => T + ih - (v/max)*ih;
-
-  const ticks=4, grid=[], ylab=[];
-  for(let i=0;i<=ticks;i++){
-    const v=Math.round(max*i/ticks), yy=y(v);
-    grid.push(`<line class="gridline" x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}"/>`);
-    ylab.push(`<text class="axis-txt" x="${L-9}" y="${yy+4}" text-anchor="end">${v}</text>`);
-  }
-
-  const line = pts.map((p,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(p.n).toFixed(1)}`).join("");
-  const area = `${line}L${x(pts.length-1).toFixed(1)},${T+ih}L${x(0).toFixed(1)},${T+ih}Z`;
-
-  // x labels: at most ~8, always first and last
-  const step = Math.max(1, Math.ceil(pts.length/8));
-  const xlab = pts.map((p,i)=>
-    (i%step===0 || i===pts.length-1)
-      ? `<text class="axis-txt" x="${x(i)}" y="${H-8}" text-anchor="middle">${fmtShort(p.date)}</text>` : ""
-  ).join("");
-
-  // selective direct label on the peak only
-  const pi = pts.reduce((b,p,i)=>p.n>pts[b].n?i:b,0);
-  const peak = pts[pi].n>0
-    ? `<circle cx="${x(pi)}" cy="${y(pts[pi].n)}" r="4.5" fill="#00c5ff" stroke="#fff" stroke-width="2"/>
-       <text class="axis-txt" x="${x(pi)}" y="${y(pts[pi].n)-11}" text-anchor="middle"
-             style="font-weight:850;fill:#0094aa">${pts[pi].n}</text>` : "";
-
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Inbound calls per day">
-    <defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#00c5ff" stop-opacity=".20"/>
-      <stop offset="100%" stop-color="#00c5ff" stop-opacity="0"/>
-    </linearGradient></defs>
-    ${grid.join("")}${ylab.join("")}
-    <path d="${area}" fill="url(#fill)"/>
-    <path d="${line}" fill="none" stroke="#00c5ff" stroke-width="2"
-          stroke-linejoin="round" stroke-linecap="round"/>
-    ${peak}
-    <line id="cross" x1="0" x2="0" y1="${T}" y2="${T+ih}" stroke="#8a56f3"
-          stroke-width="1" stroke-dasharray="3 3" opacity="0"/>
-    <circle id="dot" r="5.5" fill="#00c5ff" stroke="#fff" stroke-width="2" opacity="0"/>
-    <rect id="hit" x="${L}" y="${T}" width="${iw}" height="${ih}" fill="transparent"/>
-    ${xlab}
-  </svg>`;
-}
-
-function wireChart(rows){
-  const svg=document.querySelector("#chartWrap svg"); if(!svg) return;
-  const pts=dailySeries(rows);
-  const hit=svg.querySelector("#hit"), cross=svg.querySelector("#cross"),
-        dot=svg.querySelector("#dot"), tip=document.getElementById("tip"),
-        wrap=document.getElementById("chartWrap");
-  const W=1000,H=260,L=44,R=16,T=14,B=30,iw=W-L-R,ih=H-T-B;
-  const max=Math.max(4,...pts.map(p=>p.n));
-  const X=i=>pts.length===1?L+iw/2:L+(i/(pts.length-1))*iw;
-  const Y=v=>T+ih-(v/max)*ih;
-
-  function move(ev){
-    const rect=svg.getBoundingClientRect();
-    const px=(ev.clientX-rect.left)/rect.width*W;
-    let i=pts.length===1?0:Math.round((px-L)/iw*(pts.length-1));
-    i=Math.max(0,Math.min(pts.length-1,i)); const p=pts[i];
-    cross.setAttribute("x1",X(i)); cross.setAttribute("x2",X(i)); cross.setAttribute("opacity",".7");
-    dot.setAttribute("cx",X(i)); dot.setAttribute("cy",Y(p.n)); dot.setAttribute("opacity","1");
-    tip.innerHTML=`<span class="d">${fmtShort(p.date)}</span><span class="v">${p.n}</span> call${p.n===1?"":"s"}`;
-    tip.style.opacity="1";
-    const tw=tip.offsetWidth, ww=wrap.clientWidth;
-    tip.style.left=Math.max(0,Math.min(ww-tw, X(i)/W*ww - tw/2))+"px";
-    tip.style.top=Math.max(0,(Y(p.n)/H*wrap.clientHeight) - tip.offsetHeight - 12)+"px";
-  }
-  hit.addEventListener("mousemove",move);
-  hit.addEventListener("mouseleave",()=>{
-    cross.setAttribute("opacity","0"); dot.setAttribute("opacity","0"); tip.style.opacity="0";
-  });
 }
 
 /* ---------------------------------------------------------------- table */
