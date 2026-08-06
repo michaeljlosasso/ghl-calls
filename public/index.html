@@ -191,6 +191,13 @@ thead th:hover{color:var(--ll-black)}
 tbody td{padding:11px 12px;border-top:1px solid #f1f2f4;white-space:nowrap}
 tbody tr:hover{background:#fafafa}
 .mono{font-variant-numeric:tabular-nums}
+.contact-link{
+  color:inherit;text-decoration:none;display:inline-flex;align-items:center;gap:5px;
+  border-bottom:1px dashed #c7cdd4;transition:color 140ms ease,border-color 140ms ease;
+}
+.contact-link svg{color:#b6bcc4;transition:color 140ms ease}
+.contact-link:hover{color:#0094aa;border-color:#0094aa}
+.contact-link:hover svg{color:#0094aa}
 .pill-status{
   display:inline-block;border-radius:999px;padding:3px 9px;font-size:.72rem;font-weight:850;
 }
@@ -271,7 +278,8 @@ tbody tr:hover{background:#fafafa}
 "use strict";
 
 /* ------------------------------------------------------------- constants */
-const F = { ID:0, LOC:1, DATE:2, TIME:3, STATUS:4, FROM:5, TO:6, DUR:7 };
+const F = { ID:0, LOC:1, DATE:2, TIME:3, STATUS:4, FROM:5, TO:6, DUR:7, CID:8 };
+const GHL_BASE = "https://app.gohighlevel.com/v2/location";
 const MISSED = new Set(["no-answer","busy","failed"]);
 const MONTHS = ["January","February","March","April","May","June","July",
                 "August","September","October","November","December"];
@@ -424,7 +432,9 @@ function table(rows){
   const body = slice.length ? slice.map(r=>`<tr>
       <td class="mono">${fmtShort(r[F.DATE])}<span style="color:var(--muted)"> ${r[F.TIME].slice(0,5)}</span></td>
       <td>${esc(names[r[F.LOC]]||r[F.LOC])}</td>
-      <td class="mono">${fmtPhone(r[F.FROM])}</td>
+      <td class="mono">${r[F.CID]
+        ? `<a class="contact-link" href="${GHL_BASE}/${esc(r[F.LOC])}/contacts/detail/${esc(r[F.CID])}" target="_blank" rel="noopener" title="Open contact in GHL">${fmtPhone(r[F.FROM])}<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg></a>`
+        : fmtPhone(r[F.FROM])}</td>
       <td class="mono">${fmtPhone(r[F.TO])}</td>
       <td>${statusPill(r[F.STATUS])}</td>
       <td class="mono">${r[F.DUR]==null?"—":fmtDur(r[F.DUR])}</td>

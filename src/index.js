@@ -126,7 +126,8 @@ const SQL_CALLS = `
     status,
     from_number,
     to_number,
-    duration_seconds
+    duration_seconds,
+    contact_id
   FROM \`${PROJECT}.ghl.calls\`
   WHERE direction = 'inbound'
   ORDER BY call_timestamp_et
@@ -170,11 +171,12 @@ async function buildPayload(env) {
       all_rows: Number(m[3] || 0),
     },
     locations: locMap,
-    fields: ["id", "loc", "date", "time", "status", "from", "to", "dur"],
-    // [message_id, location_id, YYYY-MM-DD, HH:MM:SS, status, from, to, seconds]
+    fields: ["id", "loc", "date", "time", "status", "from", "to", "dur", "cid"],
+    // [message_id, location_id, YYYY-MM-DD, HH:MM:SS, status, from, to, seconds, contact_id]
     rows: calls.rows.map((r) => [
       r[0], r[1], r[2], r[3], r[4], r[5], r[6],
       r[7] === null || r[7] === undefined ? null : Number(r[7]),
+      r[8] || null,
     ]),
   };
 }
