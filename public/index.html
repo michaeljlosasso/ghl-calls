@@ -329,7 +329,7 @@ function rangeFor(preset){
 /* ------------------------------------------------------------------ fetch */
 async function load(){
   try{
-    const r = await fetch("/api/data");
+    const r = await fetch("/api/data", { cache: "no-store" });
     const j = await r.json();
     if(!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
     S.data = j;

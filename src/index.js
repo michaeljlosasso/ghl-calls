@@ -215,21 +215,28 @@ export default {
         if (hit) {
           const r = new Response(hit.body, hit);
           r.headers.set("X-Cache", "HIT");
+          // Edge keeps the 1h copy; browsers must always revalidate so
+          // deploys and nightly syncs show up on a plain refresh.
+          r.headers.set("Cache-Control", "no-store");
           return r;
         }
       }
 
       try {
         const payload = await buildPayload(env);
-        const resp = new Response(JSON.stringify(payload), {
+        const body = JSON.stringify(payload);
+        // Edge copy carries max-age so caches.default honors the 1h TTL...
+        const edgeCopy = new Response(body, {
           headers: {
             ...JSON_HEADERS,
             "Cache-Control": `public, max-age=${CACHE_SECONDS}`,
-            "X-Cache": "MISS",
           },
         });
-        ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-        return resp;
+        ctx.waitUntil(cache.put(cacheKey, edgeCopy));
+        // ...but the client response is never browser-cached.
+        return new Response(body, {
+          headers: { ...JSON_HEADERS, "Cache-Control": "no-store", "X-Cache": "MISS" },
+        });
       } catch (err) {
         return new Response(
           JSON.stringify({ error: String(err && err.message ? err.message : err) }),
