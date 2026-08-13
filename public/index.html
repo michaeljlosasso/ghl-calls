@@ -268,6 +268,19 @@ tbody tr:hover{background:#fafafa}
       </div>
     </div>
 
+    <div class="pop-wrap">
+      <button class="filter-control" id="statusBtn" aria-expanded="false">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8a56f3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+        </svg>
+        <span id="statusLabel">All Statuses</span>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="loc-popover" id="statusPop" style="width:min(250px,calc(100vw - 48px))">
+        <div class="loc-list" id="statusList" style="max-height:none"></div>
+      </div>
+    </div>
+
     <div class="freshness" id="freshness">Loading…</div>
   </div>
 
@@ -289,10 +302,17 @@ const PRESETS = ["Today","Yesterday","Week To Date","Month To Date","Year To Dat
 const PAGE = 50;
 
 /* ------------------------------------------------------------------ state */
+const STATUS_GROUPS = [
+  { key:"answered",  label:"Answered",  match: s => s === "completed" },
+  { key:"missed",    label:"Missed",    match: s => MISSED.has(s) },
+  { key:"voicemail", label:"Voicemail", match: s => s === "voicemail" },
+];
+
 const S = {
   data:null, err:null,
   preset:"Month To Date", start:null, end:null,
   locs:new Set(),            // empty == all
+  stats:new Set(),           // status group keys; empty == all
   calMonth:null,             // left-hand month of the two-month view
   pickStage:0,               // 0 = choose start, 1 = choose end
   page:1, sortKey:"date", sortDir:-1,
@@ -336,7 +356,7 @@ async function load(){
     const [a,b] = rangeFor(S.preset);
     S.start=a; S.end=b;
     S.calMonth = new Date(parse(b).getFullYear(), parse(b).getMonth()-1, 1);
-    buildQuickSelect(); buildLocations(); renderFreshness();
+    buildQuickSelect(); buildLocations(); buildStatuses(); renderFreshness();
   }catch(e){ S.err = String(e.message||e); }
   render();
 }
@@ -344,9 +364,10 @@ async function load(){
 /* ------------------------------------------------------------- filtering */
 function filtered(){
   if(!S.data) return [];
-  const a=S.start, b=S.end, useLoc=S.locs.size>0;
+  const a=S.start, b=S.end, useLoc=S.locs.size>0, useStat=S.stats.size>0;
   return S.data.rows.filter(r =>
-    r[F.DATE]>=a && r[F.DATE]<=b && (!useLoc || S.locs.has(r[F.LOC]))
+    r[F.DATE]>=a && r[F.DATE]<=b && (!useLoc || S.locs.has(r[F.LOC])) &&
+    (!useStat || STATUS_GROUPS.some(g => S.stats.has(g.key) && g.match(r[F.STATUS])))
   );
 }
 
@@ -607,12 +628,43 @@ function updateLocLabel(){
     : `${n} Locations`;
 }
 
+/* --------------------------------------------------------------- status */
+function buildStatuses(){
+  const el=document.getElementById("statusList");
+  const counts={};
+  for(const g of STATUS_GROUPS) counts[g.key]=0;
+  if(S.data) for(const r of S.data.rows){
+    const g=STATUS_GROUPS.find(g=>g.match(r[F.STATUS]));
+    if(g) counts[g.key]++;
+  }
+  el.innerHTML = STATUS_GROUPS.map(g=>`
+    <div class="loc-item${S.stats.has(g.key)?" on":""}" data-k="${g.key}">
+      <span class="cbx">${S.stats.has(g.key)?"✓":""}</span>
+      <span>${g.label}</span>
+      <span class="n">${(counts[g.key]||0).toLocaleString()}</span>
+    </div>`).join("");
+  el.querySelectorAll(".loc-item").forEach(it=>it.onclick=()=>{
+    const k=it.dataset.k;
+    S.stats.has(k) ? S.stats.delete(k) : S.stats.add(k);
+    if(S.stats.size===STATUS_GROUPS.length) S.stats.clear(); // all checked == no filter
+    S.page=1; buildStatuses(); updateStatusLabel(); render();
+  });
+}
+function updateStatusLabel(){
+  const el=document.getElementById("statusLabel");
+  const n=S.stats.size;
+  el.textContent = n===0 ? "All Statuses"
+    : STATUS_GROUPS.filter(g=>S.stats.has(g.key)).map(g=>g.label).join(" + ");
+}
+
 /* ------------------------------------------------------------- popovers */
 function closePops(){
   document.getElementById("datePop").classList.remove("open");
   document.getElementById("locPop").classList.remove("open");
+  document.getElementById("statusPop").classList.remove("open");
   document.getElementById("dateBtn").setAttribute("aria-expanded","false");
   document.getElementById("locBtn").setAttribute("aria-expanded","false");
+  document.getElementById("statusBtn").setAttribute("aria-expanded","false");
 }
 function toggle(popId, btnId){
   const pop=document.getElementById(popId), btn=document.getElementById(btnId);
@@ -622,8 +674,10 @@ function toggle(popId, btnId){
 }
 document.getElementById("dateBtn").onclick = e => { e.stopPropagation(); toggle("datePop","dateBtn"); };
 document.getElementById("locBtn").onclick  = e => { e.stopPropagation(); toggle("locPop","locBtn"); };
+document.getElementById("statusBtn").onclick = e => { e.stopPropagation(); toggle("statusPop","statusBtn"); };
 document.getElementById("datePop").onclick = e => e.stopPropagation();
 document.getElementById("locPop").onclick  = e => e.stopPropagation();
+document.getElementById("statusPop").onclick = e => e.stopPropagation();
 document.addEventListener("click", closePops);
 document.addEventListener("keydown", e => { if(e.key==="Escape") closePops(); });
 document.getElementById("locSearch").oninput = e => buildLocations(e.target.value);

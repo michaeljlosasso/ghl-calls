@@ -6,5 +6,8 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
   }
 }
