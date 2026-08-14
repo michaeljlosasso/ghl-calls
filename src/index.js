@@ -2,6 +2,9 @@
  * ghl-calls — LL.Media inbound call log widget.
  *
  * Static assets are served from Workers Assets; /api/* is handled here.
+ * Note: rows whose from_number is not a phone number are web-chat sessions
+ * ("Guest Visitor 002" -> "Rep Digi") that GHL files under TYPE_CALL. They are
+ * excluded -- they are not calls and they skew answer/no-talk rates.
  * The Worker signs a Google service-account JWT with Web Crypto, exchanges it
  * for an access token, and queries BigQuery directly. Results are cached at the
  * edge for CACHE_SECONDS so the nightly sync shows up without a redeploy and
@@ -130,6 +133,7 @@ const SQL_CALLS = `
     contact_id
   FROM \`${PROJECT}.ghl.calls\`
   WHERE direction = 'inbound'
+    AND REGEXP_CONTAINS(from_number, r'^\\+?[0-9]')
   ORDER BY call_timestamp_et
 `;
 
@@ -137,6 +141,7 @@ const SQL_LOCATIONS = `
   SELECT location_id, ANY_VALUE(location_name) AS location_name
   FROM \`${PROJECT}.ghl.calls\`
   WHERE direction = 'inbound'
+    AND REGEXP_CONTAINS(from_number, r'^\\+?[0-9]')
   GROUP BY location_id
   ORDER BY location_name
 `;
