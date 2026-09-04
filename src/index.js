@@ -137,12 +137,24 @@ const SQL_CALLS = `
   ORDER BY call_timestamp_et
 `;
 
+// Display names come from ghl.locations (re-synced daily), NOT from the name
+// frozen onto each call row at pull time. GHL sub-accounts get renamed and
+// recycled -- "OPEN - Pella Nashville" is GES Bath today -- and a renamed
+// account carries both names in ghl.calls, so ANY_VALUE() there returned a
+// stale, nondeterministic label. Falls back to the call-row name if a location
+// is somehow absent from the locations table.
 const SQL_LOCATIONS = `
-  SELECT location_id, ANY_VALUE(location_name) AS location_name
-  FROM \`${PROJECT}.ghl.calls\`
-  WHERE direction = 'inbound'
-    AND REGEXP_CONTAINS(from_number, r'^\\+?[0-9]')
-  GROUP BY location_id
+  WITH called AS (
+    SELECT location_id, ANY_VALUE(location_name) AS fallback_name
+    FROM \`${PROJECT}.ghl.calls\`
+    WHERE direction = 'inbound'
+      AND REGEXP_CONTAINS(from_number, r'^\\+?[0-9]')
+    GROUP BY location_id
+  )
+  SELECT c.location_id,
+         TRIM(COALESCE(l.location_name, c.fallback_name)) AS location_name
+  FROM called c
+  LEFT JOIN \`${PROJECT}.ghl.locations\` l USING(location_id)
   ORDER BY location_name
 `;
 
