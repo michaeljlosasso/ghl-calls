@@ -61,6 +61,9 @@ body{
 .filter-control .chev{transition:transform 160ms ease;color:#9ca3af}
 .filter-control[aria-expanded="true"] .chev{transform:rotate(180deg)}
 .freshness{margin-left:auto;font-size:.78rem;font-weight:700;color:var(--muted)}
+.filter-control:disabled{opacity:.42;cursor:default}
+.filter-control:disabled:hover{border-color:var(--ll-border);box-shadow:0 1px 2px rgba(25,23,24,.04)}
+.export-btn:hover:not(:disabled){border-color:rgba(0,181,128,.55);box-shadow:0 7px 18px rgba(0,181,128,.10)}
 .pop-wrap{position:relative}
 
 /* ---------------- date popover ---------------- */
@@ -313,6 +316,13 @@ tbody tr:hover{background:#fafafa}
       </div>
     </div>
 
+    <button class="filter-control export-btn" id="exportBtn" title="Download the calls currently shown, as a CSV">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00a777" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+      </svg>
+      <span id="exportLabel">Export CSV</span>
+    </button>
+
     <div class="freshness" id="freshness">Loading…</div>
   </div>
 
@@ -424,6 +434,12 @@ function render(){
     return;
   }
   const rows = filtered();
+  const xb = document.getElementById("exportBtn");
+  if(xb){
+    xb.disabled = !rows.length;
+    document.getElementById("exportLabel").textContent =
+      rows.length ? `Export ${rows.length.toLocaleString()} call${rows.length===1?"":"s"}` : "Export CSV";
+  }
   c.innerHTML = routingAlert(rows) + kpis(rows) + table(rows);
   wireTable();
 }
@@ -551,9 +567,9 @@ function fmtDur(s){
 }
 
 /* ---------------------------------------------------------------- table */
-function table(rows){
+function sortRows(rows){
   const names = S.data.locations;
-  const sorted = rows.slice().sort((a,b)=>{
+  return rows.slice().sort((a,b)=>{
     const k=S.sortKey, d=S.sortDir;
     let va,vb;
     if(k==="date"){ va=a[F.DATE]+a[F.TIME]; vb=b[F.DATE]+b[F.TIME]; }
@@ -562,6 +578,11 @@ function table(rows){
     else { va=a[F[k.toUpperCase()]]||""; vb=b[F[k.toUpperCase()]]||""; }
     return va<vb?-d:va>vb?d:0;
   });
+}
+
+function table(rows){
+  const names = S.data.locations;
+  const sorted = sortRows(rows);
   const pages=Math.max(1,Math.ceil(sorted.length/PAGE));
   if(S.page>pages) S.page=pages;
   const slice=sorted.slice((S.page-1)*PAGE, S.page*PAGE);
@@ -614,14 +635,72 @@ function wireTable(){
   if(n) n.onclick=()=>{ S.page++; render(); };
 }
 
+function statusLabel(r){
+  const s = r[F.STATUS];
+  if(isAnswered(r)) return "Answered";
+  if(isNoTalk(r))   return "No talk";
+  return s==="no-answer" ? "No answer"
+       : s ? s.charAt(0).toUpperCase()+s.slice(1) : "Unknown";
+}
+
 function statusPill(r){
   const s = r[F.STATUS];
-  if(isAnswered(r)) return `<span class="pill-status s-completed">Answered</span>`;
-  if(isNoTalk(r))   return `<span class="pill-status s-notalk" title="Call connected but recorded zero seconds of talk time — usually a forwarding or routing failure">No talk</span>`;
+  const label = statusLabel(r);
+  if(isAnswered(r)) return `<span class="pill-status s-completed">${label}</span>`;
+  if(isNoTalk(r))   return `<span class="pill-status s-notalk" title="Call connected but recorded zero seconds of talk time — usually a forwarding or routing failure">${label}</span>`;
   const cls = MISSED.has(s) ? "s-missed" : s==="voicemail" ? "s-voicemail" : "s-other";
-  const label = s==="no-answer" ? "No answer"
-              : s ? s.charAt(0).toUpperCase()+s.slice(1) : "Unknown";
   return `<span class="pill-status ${cls}">${esc(label)}</span>`;
+}
+
+/* ---------------------------------------------------------------- export */
+// Exports exactly what is on screen: current date range, location and status
+// filters, in the current sort order -- not the whole dataset.
+function csvCell(v){
+  const s = v == null ? "" : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function exportCsv(){
+  if(!S.data) return;
+  const rows = sortRows(filtered());
+  if(!rows.length) return;
+  const names = S.data.locations;
+
+  const header = ["Date","Time","Location","From","From (digits)","Routed To",
+                  "Status","GHL Status","Duration (sec)","Duration","GHL Contact"];
+  const lines = [header.map(csvCell).join(",")];
+  for(const r of rows){
+    lines.push([
+      r[F.DATE],
+      r[F.TIME],
+      names[r[F.LOC]] || r[F.LOC],
+      fmtPhone(r[F.FROM]),
+      String(r[F.FROM] || "").replace(/\D/g, ""),
+      fmtPhone(r[F.TO]),
+      statusLabel(r),
+      r[F.STATUS] || "",
+      r[F.DUR] == null ? "" : r[F.DUR],
+      r[F.DUR] == null ? "" : fmtDur(r[F.DUR]),
+      r[F.CID] ? `${GHL_BASE}/${r[F.LOC]}/contacts/detail/${r[F.CID]}` : ""
+    ].map(csvCell).join(","));
+  }
+
+  // Leading BOM so Excel opens it as UTF-8 (location names carry & and accents).
+  const blob = new Blob(["﻿" + lines.join("\r\n") + "\r\n"],
+                        { type: "text/csv;charset=utf-8" });
+  const name = `inbound-calls_${S.start}_to_${S.end}.csv`;
+  try{
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1500);
+  }catch(e){
+    // Some embeds block iframe-initiated downloads; open in a tab instead.
+    window.open(URL.createObjectURL(blob), "_blank", "noopener");
+  }
 }
 
 function fmtPhone(p){
@@ -792,6 +871,7 @@ function toggle(popId, btnId){
 document.getElementById("dateBtn").onclick = e => { e.stopPropagation(); toggle("datePop","dateBtn"); };
 document.getElementById("locBtn").onclick  = e => { e.stopPropagation(); toggle("locPop","locBtn"); };
 document.getElementById("statusBtn").onclick = e => { e.stopPropagation(); toggle("statusPop","statusBtn"); };
+document.getElementById("exportBtn").onclick = e => { e.stopPropagation(); closePops(); exportCsv(); };
 document.getElementById("datePop").onclick = e => e.stopPropagation();
 document.getElementById("locPop").onclick  = e => e.stopPropagation();
 document.getElementById("statusPop").onclick = e => e.stopPropagation();
