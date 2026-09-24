@@ -182,6 +182,41 @@ body{
 .al-stat strong{color:#b90053;font-weight:900}
 @media (max-width:640px){ .al-stat{margin-left:0} .al-name{min-width:0} }
 
+/* ---------------- phone search ---------------- */
+.search-wrap{
+  position:relative;display:inline-flex;align-items:center;min-height:40px;
+  border:1px solid var(--ll-border);border-radius:999px;background:#fff;
+  box-shadow:0 1px 2px rgba(25,23,24,.04);padding:0 10px 0 13px;
+  transition:border-color 160ms ease,box-shadow 160ms ease;
+}
+.search-wrap:focus-within{border-color:rgba(138,86,243,.62);box-shadow:0 7px 18px rgba(138,86,243,.08)}
+.search-ic{color:#9ca3af;flex:0 0 auto}
+.search-input{
+  border:none;outline:none;background:transparent;width:172px;
+  font-family:"Nunito",sans-serif;font-size:.93rem;font-weight:800;
+  color:var(--ll-black);padding:0 6px 0 8px;
+}
+.search-input::placeholder{color:#9ca3af;font-weight:700}
+.search-clear{
+  border:none;background:#eef0f2;color:#6b7280;cursor:pointer;flex:0 0 auto;
+  width:19px;height:19px;border-radius:999px;font-size:15px;line-height:1;
+  display:flex;align-items:center;justify-content:center;padding:0 0 1px;
+}
+.search-clear:hover{background:#e0e3e6;color:var(--ll-black)}
+.hint-card{
+  border:1px solid rgba(138,86,243,.22);border-radius:14px;
+  background:rgba(138,86,243,.045);box-shadow:var(--card-shadow);
+  padding:15px 18px;margin-bottom:14px;font-size:.9rem;font-weight:750;
+  color:#3f3f46;display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  animation:fadeUp 260ms ease both;
+}
+.hint-card button{
+  border:1px solid rgba(138,86,243,.45);background:#fff;color:#6b3fc9;
+  font-family:"Nunito";font-weight:850;font-size:.85rem;
+  border-radius:999px;padding:7px 15px;cursor:pointer;
+}
+.hint-card button:hover{background:rgba(138,86,243,.08)}
+
 /* ---------------- KPI tiles ---------------- */
 .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
 .metric-card{position:relative;overflow:hidden}
@@ -316,6 +351,15 @@ tbody tr:hover{background:#fafafa}
       </div>
     </div>
 
+    <div class="search-wrap">
+      <svg class="search-ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+        <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.2-4.2"/>
+      </svg>
+      <input id="searchBox" class="search-input" type="text" inputmode="tel"
+             placeholder="Search phone number…" autocomplete="off" spellcheck="false" />
+      <button class="search-clear" id="searchClear" type="button" aria-label="Clear search" hidden>&times;</button>
+    </div>
+
     <button class="filter-control export-btn" id="exportBtn" title="Download the calls currently shown, as a CSV">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00a777" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
@@ -363,6 +407,7 @@ const S = {
   preset:"Month To Date", start:null, end:null,
   locs:new Set(),            // empty == all
   stats:new Set(),           // status group keys; empty == all
+  q:"",                      // digits-only phone search
   calMonth:null,             // left-hand month of the two-month view
   pickStage:0,               // 0 = choose start, 1 = choose end
   page:1, sortKey:"date", sortDir:-1,
@@ -403,6 +448,12 @@ async function load(){
     const j = await r.json();
     if(!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
     S.data = j;
+    // Cache a digits-only "<from>|<to>" per row so phone search is a plain
+    // substring test. The separator stops a query from matching across the
+    // boundary between the two numbers.
+    for(const r of j.rows){
+      r.search = String(r[F.FROM]||"").replace(/\D/g,"") + "|" + String(r[F.TO]||"").replace(/\D/g,"");
+    }
     const [a,b] = rangeFor(S.preset);
     S.start=a; S.end=b;
     S.calMonth = new Date(parse(b).getFullYear(), parse(b).getMonth()-1, 1);
@@ -412,13 +463,26 @@ async function load(){
 }
 
 /* ------------------------------------------------------------- filtering */
+// Matches a digits-only query against either number on the row. Ignores the
+// date range so we can tell "no such number" from "not in this range".
+function matchesQuery(r){ return !S.q || r.search.includes(S.q); }
+
 function filtered(){
   if(!S.data) return [];
   const a=S.start, b=S.end, useLoc=S.locs.size>0, useStat=S.stats.size>0;
   return S.data.rows.filter(r =>
     r[F.DATE]>=a && r[F.DATE]<=b && (!useLoc || S.locs.has(r[F.LOC])) &&
-    (!useStat || STATUS_GROUPS.some(g => S.stats.has(g.key) && g.match(r)))
+    (!useStat || STATUS_GROUPS.some(g => S.stats.has(g.key) && g.match(r))) &&
+    matchesQuery(r)
   );
+}
+
+// Same number, any date — used to offer "search all time" when the current
+// range hides every match.
+function matchesAnywhere(){
+  if(!S.data || !S.q) return [];
+  const useLoc=S.locs.size>0;
+  return S.data.rows.filter(r => matchesQuery(r) && (!useLoc || S.locs.has(r[F.LOC])));
 }
 
 /* --------------------------------------------------------------- render */
@@ -440,13 +504,41 @@ function render(){
     document.getElementById("exportLabel").textContent =
       rows.length ? `Export ${rows.length.toLocaleString()} call${rows.length===1?"":"s"}` : "Export CSV";
   }
-  c.innerHTML = routingAlert(rows) + kpis(rows) + table(rows);
+  c.innerHTML = searchHint(rows) + routingAlert(rows) + kpis(rows) + table(rows);
+  const wb = document.getElementById("widenBtn");
+  if(wb) wb.onclick = widenToAllTime;
   wireTable();
 }
 
 /* Locations whose calls connect but produce no conversation are almost always
    a forwarding/routing failure, not caller behaviour: the line rings for a
    fixed few seconds, connects, and drops before anyone speaks. Surface them. */
+/* A number can easily have calls outside the selected range. Rather than
+   showing a bare "no results", say so and offer to widen. */
+function searchHint(rows){
+  if(!S.q || rows.length) return "";
+  const all = matchesAnywhere();
+  if(!all.length) return "";
+  const dates = all.map(r=>r[F.DATE]).sort();
+  const span = dates[0]===dates[dates.length-1]
+    ? fmtShort(dates[0]) : `${fmtShort(dates[0])} – ${fmtShort(dates[dates.length-1])}`;
+  return `<div class="hint-card">
+    <span>No calls from that number in this date range — but
+      <strong>${all.length} call${all.length===1?"":"s"}</strong> outside it (${span}).</span>
+    <button id="widenBtn" type="button">Search all time</button>
+  </div>`;
+}
+
+function widenToAllTime(){
+  S.start = S.data.meta.first_date;
+  S.end   = S.data.meta.last_date;
+  S.preset = "Custom Range";
+  S.page = 1;
+  document.getElementById("dateLabel").textContent = `${fmtShort(S.start)} – ${fmtShort(S.end)}`;
+  S.calMonth = new Date(parse(S.end).getFullYear(), parse(S.end).getMonth()-1, 1);
+  buildQuickSelect(); buildCalendar(); render();
+}
+
 function routingAlert(rows){
   const tally = subset => {
     const by = new Map();
@@ -872,11 +964,32 @@ document.getElementById("dateBtn").onclick = e => { e.stopPropagation(); toggle(
 document.getElementById("locBtn").onclick  = e => { e.stopPropagation(); toggle("locPop","locBtn"); };
 document.getElementById("statusBtn").onclick = e => { e.stopPropagation(); toggle("statusPop","statusBtn"); };
 document.getElementById("exportBtn").onclick = e => { e.stopPropagation(); closePops(); exportCsv(); };
+
+const searchBox = document.getElementById("searchBox");
+const searchClear = document.getElementById("searchClear");
+function applySearch(){
+  S.q = searchBox.value.replace(/\D/g, "");   // digits only, so any format works
+  searchClear.hidden = !searchBox.value;
+  S.page = 1;
+  render();
+}
+searchBox.oninput = applySearch;
+searchBox.onclick = e => e.stopPropagation();
+searchClear.onclick = e => {
+  e.stopPropagation();
+  searchBox.value = ""; applySearch(); searchBox.focus();
+};
 document.getElementById("datePop").onclick = e => e.stopPropagation();
 document.getElementById("locPop").onclick  = e => e.stopPropagation();
 document.getElementById("statusPop").onclick = e => e.stopPropagation();
 document.addEventListener("click", closePops);
-document.addEventListener("keydown", e => { if(e.key==="Escape") closePops(); });
+document.addEventListener("keydown", e => {
+  if(e.key !== "Escape") return;
+  if(document.activeElement === searchBox && searchBox.value){
+    searchBox.value = ""; applySearch(); return;
+  }
+  closePops();
+});
 document.getElementById("locSearch").oninput = e => buildLocations(e.target.value);
 document.getElementById("locAll").onclick = () => {
   Object.keys(S.data.locations).forEach(id=>S.locs.add(id));
