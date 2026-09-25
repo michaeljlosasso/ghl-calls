@@ -12,11 +12,24 @@
  *
  * Secret required:  GCP_SA_KEY  — the full service-account JSON, as a string.
  *   wrangler secret put GCP_SA_KEY
+ *
+ * A cron trigger also keeps caller names current. ghl.calls is synced once a
+ * day around 07:17 ET, so names can never be fresher than that; this runs just
+ * behind it, resolves any contact_id it has not seen before against the GHL
+ * contacts API, and writes the result to ghl.contacts.
+ *
+ * Secrets for that path:
+ *   GCP_SA_KEY_WRITE    — service account allowed to insert into ghl.contacts
+ *   CONTACTS_SYNC_KEY   — shared secret for the manual POST /api/sync-contacts
  */
 
 const PROJECT = "ll-media-project";
 const CACHE_SECONDS = 3600;
 const TOKEN_SCOPE = "https://www.googleapis.com/auth/bigquery.readonly";
+const TOKEN_SCOPE_WRITE = "https://www.googleapis.com/auth/bigquery";
+const SYNC_MAX_CONTACTS = 300;   // per run; ~40 new contacts/day, so ample
+const SYNC_CONCURRENCY = 6;
+const SYNC_LOOKBACK_DAYS = 14;   // resilience if the cron misses a few nights
 
 /* ------------------------------------------------------------------ auth */
 
@@ -38,19 +51,21 @@ function pemToPkcs8(pem) {
   return out.buffer;
 }
 
-let cachedToken = null; // { token, exp } — reused across requests on a warm isolate
+const tokenCache = {}; // keyed by secret+scope — reused on a warm isolate
 
-async function getAccessToken(env) {
+async function getAccessToken(env, keyName = "GCP_SA_KEY", scope = TOKEN_SCOPE) {
   const now = Math.floor(Date.now() / 1000);
-  if (cachedToken && cachedToken.exp > now + 60) return cachedToken.token;
+  const ck = keyName + "|" + scope;
+  const hit = tokenCache[ck];
+  if (hit && hit.exp > now + 60) return hit.token;
 
-  if (!env.GCP_SA_KEY) throw new Error("GCP_SA_KEY secret is not set");
-  const sa = JSON.parse(env.GCP_SA_KEY);
+  if (!env[keyName]) throw new Error(keyName + " secret is not set");
+  const sa = JSON.parse(env[keyName]);
 
   const header = { alg: "RS256", typ: "JWT" };
   const claim = {
     iss: sa.client_email,
-    scope: TOKEN_SCOPE,
+    scope,
     aud: "https://oauth2.googleapis.com/token",
     exp: now + 3600,
     iat: now,
@@ -83,14 +98,14 @@ async function getAccessToken(env) {
   });
   if (!resp.ok) throw new Error(`token exchange failed: ${resp.status} ${await resp.text()}`);
   const data = await resp.json();
-  cachedToken = { token: data.access_token, exp: now + (data.expires_in || 3600) };
-  return cachedToken.token;
+  tokenCache[ck] = { token: data.access_token, exp: now + (data.expires_in || 3600) };
+  return tokenCache[ck].token;
 }
 
 /* -------------------------------------------------------------- bigquery */
 
-async function bq(env, sql) {
-  const token = await getAccessToken(env);
+async function bq(env, sql, keyName, scope) {
+  const token = await getAccessToken(env, keyName, scope);
   const resp = await fetch(
     `https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT}/queries`,
     {
@@ -212,6 +227,112 @@ async function buildPayload(env) {
   };
 }
 
+/* -------------------------------------------------------- contact names */
+
+// Contacts we have never looked up. Restricted to recent calls: ghl.calls is
+// partitioned on call_date_et, and old contacts are mostly purged by GHL
+// anyway, so scanning all of history would cost more and return less.
+const SQL_PENDING_CONTACTS = `
+  SELECT c.location_id, c.contact_id, ANY_VALUE(t.pit_token) AS pit_token
+  FROM \`${PROJECT}.ghl.calls\` c
+  JOIN \`${PROJECT}.ghl.location_tokens\` t USING (location_id)
+  LEFT JOIN \`${PROJECT}.ghl.contacts\` k
+         ON k.contact_id = c.contact_id AND k.location_id = c.location_id
+  WHERE c.direction = 'inbound'
+    AND c.contact_id IS NOT NULL
+    AND k.contact_id IS NULL
+    AND REGEXP_CONTAINS(c.from_number, r'^\\+?[0-9]')
+    AND c.call_date_et >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL ${SYNC_LOOKBACK_DAYS} DAY)
+  GROUP BY c.location_id, c.contact_id
+  LIMIT ${SYNC_MAX_CONTACTS}
+`;
+
+// 200 = found. 400 "Contact not found" = GHL has purged it, record that so we
+// stop asking. Anything else (401, 429, 5xx) is transient: leave the contact
+// unrecorded so the next run retries it.
+async function fetchContactName(contactId, pit) {
+  const resp = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
+    headers: { Authorization: `Bearer ${pit}`, Version: "2021-07-28", Accept: "application/json" },
+  });
+  if (resp.status === 200) {
+    const j = await resp.json();
+    const c = j.contact || j;
+    return { status: "ok", first: (c.firstName || "").trim(), last: (c.lastName || "").trim() };
+  }
+  if (resp.status === 400) {
+    const body = await resp.text();
+    if (body.includes("not found")) return { status: "missing", first: "", last: "" };
+  }
+  return null; // transient — retry next run
+}
+
+async function mapPool(items, limit, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (i < items.length) {
+        const k = i++;
+        try { out[k] = await fn(items[k]); } catch { out[k] = null; }
+      }
+    })
+  );
+  return out;
+}
+
+async function syncContactNames(env) {
+  const pending = await bq(env, SQL_PENDING_CONTACTS);
+  if (!pending.rows.length) return { pending: 0, named: 0, missing: 0, skipped: 0, inserted: 0 };
+
+  const results = await mapPool(pending.rows, SYNC_CONCURRENCY, async ([locationId, contactId, pit]) => {
+    if (!pit) return null;
+    const r = await fetchContactName(contactId, pit);
+    return r && { locationId, contactId, ...r };
+  });
+
+  const got = results.filter(Boolean);
+  if (!got.length) {
+    return { pending: pending.rows.length, named: 0, missing: 0, skipped: pending.rows.length, inserted: 0 };
+  }
+
+  // Streaming insert: no SQL string building, and insertId makes a retried
+  // run idempotent rather than duplicating rows.
+  const now = new Date().toISOString();
+  const body = {
+    skipInvalidRows: false,
+    rows: got.map((g) => ({
+      insertId: `${g.locationId}:${g.contactId}`,
+      json: {
+        location_id: g.locationId,
+        contact_id: g.contactId,
+        first_name: g.first || null,
+        last_name: g.last || null,
+        status: g.status,
+        source: "ghl_api",
+        synced_at: now,
+      },
+    })),
+  };
+  const token = await getAccessToken(env, "GCP_SA_KEY_WRITE", TOKEN_SCOPE_WRITE);
+  const resp = await fetch(
+    `https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT}/datasets/ghl/tables/contacts/insertAll`,
+    { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body) }
+  );
+  const out = await resp.json();
+  if (!resp.ok || out.insertErrors) {
+    throw new Error(`contacts insert failed: ${resp.status} ${JSON.stringify(out).slice(0, 400)}`);
+  }
+
+  return {
+    pending: pending.rows.length,
+    named: got.filter((g) => g.status === "ok" && (g.first || g.last)).length,
+    missing: got.filter((g) => g.status === "missing").length,
+    skipped: pending.rows.length - got.length,
+    inserted: got.length,
+  };
+}
+
 /* --------------------------------------------------------------- handler */
 
 const JSON_HEADERS = {
@@ -221,6 +342,16 @@ const JSON_HEADERS = {
 };
 
 export default {
+  // Runs just after the nightly ghl.calls sync so new calls arrive with their
+  // caller name already resolved.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      syncContactNames(env)
+        .then((s) => console.log("contact-name sync", JSON.stringify(s)))
+        .catch((e) => console.error("contact-name sync failed:", e && e.message ? e.message : e))
+    );
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
@@ -232,6 +363,22 @@ export default {
       return new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), {
         headers: JSON_HEADERS,
       });
+    }
+
+    // Manual "run it now" for the name sync. Guarded by a shared secret; the
+    // widget never calls this.
+    if (url.pathname === "/api/sync-contacts") {
+      const key = request.headers.get("X-Sync-Key") || url.searchParams.get("key");
+      if (!env.CONTACTS_SYNC_KEY || key !== env.CONTACTS_SYNC_KEY) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: JSON_HEADERS });
+      }
+      try {
+        const stats = await syncContactNames(env);
+        return new Response(JSON.stringify({ ok: true, ...stats }), { headers: JSON_HEADERS });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: String(err && err.message ? err.message : err) }),
+          { status: 500, headers: JSON_HEADERS });
+      }
     }
 
     if (url.pathname === "/api/data") {

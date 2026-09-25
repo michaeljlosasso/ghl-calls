@@ -8,5 +8,8 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },
+  // 12:45 UTC = 08:45 EDT / 07:45 EST — always just after the ~07:17 ET
+  // ghl.calls sync, in either half of the year.
+  "triggers": { "crons": ["45 12 * * *"] },
   "observability": { "enabled": true }
 }
