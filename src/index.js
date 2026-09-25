@@ -167,11 +167,23 @@ const SQL_META = `
   FROM \`${PROJECT}.ghl.calls\`
 `;
 
+// Caller names, where we have them. GHL purges old contacts per sub-account,
+// so this table is deliberately sparse -- absent means "we don't know", and
+// the widget just leaves the cell blank.
+const SQL_CONTACTS = `
+  SELECT contact_id,
+         COALESCE(first_name,'') AS first_name,
+         COALESCE(last_name,'')  AS last_name
+  FROM \`${PROJECT}.ghl.contacts\`
+  WHERE status = 'ok' AND (first_name IS NOT NULL OR last_name IS NOT NULL)
+`;
+
 async function buildPayload(env) {
-  const [calls, locations, meta] = await Promise.all([
+  const [calls, locations, meta, contacts] = await Promise.all([
     bq(env, SQL_CALLS),
     bq(env, SQL_LOCATIONS),
     bq(env, SQL_META),
+    bq(env, SQL_CONTACTS),
   ]);
 
   const locMap = {};
@@ -188,6 +200,8 @@ async function buildPayload(env) {
       all_rows: Number(m[3] || 0),
     },
     locations: locMap,
+    // { contact_id: [first, last] } -- only contacts we actually resolved
+    contacts: Object.fromEntries(contacts.rows.map((r) => [r[0], [r[1] || "", r[2] || ""]])),
     fields: ["id", "loc", "date", "time", "status", "from", "to", "dur", "cid"],
     // [message_id, location_id, YYYY-MM-DD, HH:MM:SS, status, from, to, seconds, contact_id]
     rows: calls.rows.map((r) => [

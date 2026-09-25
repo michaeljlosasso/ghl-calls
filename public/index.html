@@ -260,6 +260,7 @@ thead th:hover{color:var(--ll-black)}
 tbody td{padding:11px 12px;border-top:1px solid #f1f2f4;white-space:nowrap}
 tbody tr:hover{background:#fafafa}
 .mono{font-variant-numeric:tabular-nums}
+.no-name{color:var(--disabled)}
 .contact-link{
   color:inherit;text-decoration:none;display:inline-flex;align-items:center;gap:5px;
   border-bottom:1px dashed #c7cdd4;transition:color 140ms ease,border-color 140ms ease;
@@ -369,7 +370,7 @@ tbody tr:hover{background:#fafafa}
         <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.2-4.2"/>
       </svg>
       <input id="searchBox" class="search-input" type="text" inputmode="tel"
-             placeholder="Search phone number…" autocomplete="off" spellcheck="false" />
+             placeholder="Search name or phone…" autocomplete="off" spellcheck="false" />
       <button class="search-clear" id="searchClear" type="button" aria-label="Clear search" hidden>&times;</button>
     </div>
 
@@ -433,6 +434,7 @@ const S = {
   stats:new Set(),           // status group keys; empty == all
   durs:new Set(),            // duration bucket keys; empty == all
   q:"",                      // digits-only phone search
+  qText:"",                  // lowercased name search
   calMonth:null,             // left-hand month of the two-month view
   pickStage:0,               // 0 = choose start, 1 = choose end
   page:1, sortKey:"date", sortDir:-1,
@@ -478,6 +480,11 @@ async function load(){
     // boundary between the two numbers.
     for(const r of j.rows){
       r.search = String(r[F.FROM]||"").replace(/\D/g,"") + "|" + String(r[F.TO]||"").replace(/\D/g,"");
+      const nm = (j.contacts && j.contacts[r[F.CID]]) || null;
+      r.first = nm ? nm[0] : "";
+      r.last  = nm ? nm[1] : "";
+      r.name  = (r.first + " " + r.last).trim();
+      r.nameSearch = r.name.toLowerCase();
     }
     const [a,b] = rangeFor(S.preset);
     S.start=a; S.end=b;
@@ -490,7 +497,10 @@ async function load(){
 /* ------------------------------------------------------------- filtering */
 // Matches a digits-only query against either number on the row. Ignores the
 // date range so we can tell "no such number" from "not in this range".
-function matchesQuery(r){ return !S.q || r.search.includes(S.q); }
+function matchesQuery(r){
+  if(S.qText) return r.nameSearch.includes(S.qText);
+  return !S.q || r.search.includes(S.q);
+}
 
 function filtered(){
   if(!S.data) return [];
@@ -506,7 +516,7 @@ function filtered(){
 // Same number, any date — used to offer "search all time" when the current
 // range hides every match.
 function matchesAnywhere(){
-  if(!S.data || !S.q) return [];
+  if(!S.data || (!S.q && !S.qText)) return [];
   const useLoc=S.locs.size>0;
   return S.data.rows.filter(r => matchesQuery(r) && (!useLoc || S.locs.has(r[F.LOC])));
 }
@@ -542,14 +552,14 @@ function render(){
 /* A number can easily have calls outside the selected range. Rather than
    showing a bare "no results", say so and offer to widen. */
 function searchHint(rows){
-  if(!S.q || rows.length) return "";
+  if((!S.q && !S.qText) || rows.length) return "";
   const all = matchesAnywhere();
   if(!all.length) return "";
   const dates = all.map(r=>r[F.DATE]).sort();
   const span = dates[0]===dates[dates.length-1]
     ? fmtShort(dates[0]) : `${fmtShort(dates[0])} – ${fmtShort(dates[dates.length-1])}`;
   return `<div class="hint-card">
-    <span>No calls from that number in this date range — but
+    <span>No matching calls in this date range — but
       <strong>${all.length} call${all.length===1?"":"s"}</strong> outside it (${span}).</span>
     <button id="widenBtn" type="button">Search all time</button>
   </div>`;
@@ -692,6 +702,7 @@ function sortRows(rows){
     let va,vb;
     if(k==="date"){ va=a[F.DATE]+a[F.TIME]; vb=b[F.DATE]+b[F.TIME]; }
     else if(k==="loc"){ va=names[a[F.LOC]]||""; vb=names[b[F.LOC]]||""; }
+    else if(k==="name"){ va=a.name||"￿"; vb=b.name||"￿"; }   // blanks last
     else if(k==="dur"){ va=a[F.DUR]??-1; vb=b[F.DUR]??-1; }
     else { va=a[F[k.toUpperCase()]]||""; vb=b[F[k.toUpperCase()]]||""; }
     return va<vb?-d:va>vb?d:0;
@@ -709,13 +720,14 @@ function table(rows){
   const body = slice.length ? slice.map(r=>`<tr>
       <td class="mono">${fmtShort(r[F.DATE])}<span style="color:var(--muted)"> ${r[F.TIME].slice(0,5)}</span></td>
       <td>${esc(names[r[F.LOC]]||r[F.LOC])}</td>
+      <td>${r.name ? esc(r.name) : '<span class="no-name">—</span>'}</td>
       <td class="mono">${r[F.CID]
         ? `<a class="contact-link" href="${GHL_BASE}/${esc(r[F.LOC])}/contacts/detail/${esc(r[F.CID])}" target="_blank" rel="noopener" title="Open contact in GHL">${fmtPhone(r[F.FROM])}<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg></a>`
         : fmtPhone(r[F.FROM])}</td>
       <td class="mono">${fmtPhone(r[F.TO])}</td>
       <td>${statusPill(r)}</td>
       <td class="mono">${r[F.DUR]==null?"—":fmtDur(r[F.DUR])}</td>
-    </tr>`).join("") : `<tr><td colspan="6" class="empty">No calls match these filters.</td></tr>`;
+    </tr>`).join("") : `<tr><td colspan="7" class="empty">No calls match these filters.</td></tr>`;
 
   return `<div class="card" style="margin-top:14px">
     <div class="eyebrow">Call Detail</div>
@@ -726,6 +738,7 @@ function table(rows){
         <thead><tr>
           <th data-k="date">When${arrow("date")}</th>
           <th data-k="loc">Location${arrow("loc")}</th>
+          <th data-k="name">Name${arrow("name")}</th>
           <th data-k="from">From${arrow("from")}</th>
           <th data-k="to">Routed To${arrow("to")}</th>
           <th data-k="status">Status${arrow("status")}</th>
@@ -784,14 +797,15 @@ function exportCsv(){
   if(!rows.length) return;
   const names = S.data.locations;
 
-  const header = ["Date","Time","Location","From","From (digits)","Routed To",
-                  "Status","GHL Status","Duration (sec)","Duration","GHL Contact"];
+  const header = ["Date","Time","Location","First Name","Last Name","From","From (digits)",
+                  "Routed To","Status","GHL Status","Duration (sec)","Duration","GHL Contact"];
   const lines = [header.map(csvCell).join(",")];
   for(const r of rows){
     lines.push([
       r[F.DATE],
       r[F.TIME],
       names[r[F.LOC]] || r[F.LOC],
+      r.first, r.last,
       fmtPhone(r[F.FROM]),
       String(r[F.FROM] || "").replace(/\D/g, ""),
       fmtPhone(r[F.TO]),
@@ -1027,7 +1041,10 @@ document.getElementById("exportBtn").onclick = e => { e.stopPropagation(); close
 const searchBox = document.getElementById("searchBox");
 const searchClear = document.getElementById("searchClear");
 function applySearch(){
-  S.q = searchBox.value.replace(/\D/g, "");   // digits only, so any format works
+  const raw = searchBox.value.trim();
+  const isText = /[a-z]/i.test(raw);           // letters => name, otherwise phone
+  S.qText = isText ? raw.toLowerCase() : "";
+  S.q     = isText ? "" : raw.replace(/\D/g, "");  // digits only, so any format works
   searchClear.hidden = !searchBox.value;
   S.page = 1;
   render();
