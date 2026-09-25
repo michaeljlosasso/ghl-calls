@@ -25,6 +25,11 @@
 
 const PROJECT = "ll-media-project";
 const CACHE_SECONDS = 3600;
+// Bump whenever the /api/data shape changes. The edge cache is per-colo, so
+// without this a colo that cached the old shape keeps serving it for up to an
+// hour -- new HTML against an old payload, which is how the Name column ended
+// up empty for everyone whose nearest colo was already warm.
+const PAYLOAD_VERSION = 2;
 const TOKEN_SCOPE = "https://www.googleapis.com/auth/bigquery.readonly";
 const TOKEN_SCOPE_WRITE = "https://www.googleapis.com/auth/bigquery";
 const SYNC_MAX_CONTACTS = 300;   // per run; ~40 new contacts/day, so ample
@@ -207,6 +212,7 @@ async function buildPayload(env) {
   const m = meta.rows[0] || [];
   return {
     generated_at: new Date().toISOString(),
+    payload_version: PAYLOAD_VERSION,
     timezone: "America/New_York",
     meta: {
       last_sync: m[0] || null,
@@ -384,9 +390,10 @@ export default {
     if (url.pathname === "/api/data") {
       const bust = url.searchParams.get("refresh") === "1";
       const cache = caches.default;
-      const cacheKey = new Request(new URL("/api/data", url.origin).toString(), {
-        method: "GET",
-      });
+      const cacheKey = new Request(
+        new URL(`/api/data?v=${PAYLOAD_VERSION}`, url.origin).toString(),
+        { method: "GET" }
+      );
 
       if (!bust) {
         const hit = await cache.match(cacheKey);
