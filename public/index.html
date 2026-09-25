@@ -351,6 +351,19 @@ tbody tr:hover{background:#fafafa}
       </div>
     </div>
 
+    <div class="pop-wrap">
+      <button class="filter-control" id="durBtn" aria-expanded="false">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8a56f3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>
+        </svg>
+        <span id="durLabel">Any Duration</span>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="loc-popover" id="durPop" style="width:min(260px,calc(100vw - 48px))">
+        <div class="loc-list" id="durList" style="max-height:none"></div>
+      </div>
+    </div>
+
     <div class="search-wrap">
       <svg class="search-ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
         <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.2-4.2"/>
@@ -402,11 +415,23 @@ const STATUS_GROUPS = [
   { key:"voicemail", label:"Voicemail", match: r => r[F.STATUS]==="voicemail" },
 ];
 
+// Buckets apply to measured talk time. ~900 calls carry no duration at all
+// (busy, ringing, and the connected-but-no-record ones) -- they get their own
+// option so a duration filter never silently swallows them.
+const DURATION_GROUPS = [
+  { key:"d30",   label:"Under 30 sec",  match: r => r[F.DUR] != null && r[F.DUR] < 30 },
+  { key:"d60",   label:"30 sec – 1 min", match: r => r[F.DUR] != null && r[F.DUR] >= 30 && r[F.DUR] < 60 },
+  { key:"d120",  label:"1 – 2 min",     match: r => r[F.DUR] != null && r[F.DUR] >= 60 && r[F.DUR] < 120 },
+  { key:"dover", label:"2 min +",       match: r => r[F.DUR] != null && r[F.DUR] >= 120 },
+  { key:"dnone", label:"No duration",   match: r => r[F.DUR] == null },
+];
+
 const S = {
   data:null, err:null,
   preset:"Month To Date", start:null, end:null,
   locs:new Set(),            // empty == all
   stats:new Set(),           // status group keys; empty == all
+  durs:new Set(),            // duration bucket keys; empty == all
   q:"",                      // digits-only phone search
   calMonth:null,             // left-hand month of the two-month view
   pickStage:0,               // 0 = choose start, 1 = choose end
@@ -457,7 +482,7 @@ async function load(){
     const [a,b] = rangeFor(S.preset);
     S.start=a; S.end=b;
     S.calMonth = new Date(parse(b).getFullYear(), parse(b).getMonth()-1, 1);
-    buildQuickSelect(); buildLocations(); buildStatuses(); renderFreshness();
+    buildQuickSelect(); buildLocations(); buildStatuses(); buildDurations(); renderFreshness();
   }catch(e){ S.err = String(e.message||e); }
   render();
 }
@@ -469,10 +494,11 @@ function matchesQuery(r){ return !S.q || r.search.includes(S.q); }
 
 function filtered(){
   if(!S.data) return [];
-  const a=S.start, b=S.end, useLoc=S.locs.size>0, useStat=S.stats.size>0;
+  const a=S.start, b=S.end, useLoc=S.locs.size>0, useStat=S.stats.size>0, useDur=S.durs.size>0;
   return S.data.rows.filter(r =>
     r[F.DATE]>=a && r[F.DATE]<=b && (!useLoc || S.locs.has(r[F.LOC])) &&
     (!useStat || STATUS_GROUPS.some(g => S.stats.has(g.key) && g.match(r))) &&
+    (!useDur || DURATION_GROUPS.some(g => S.durs.has(g.key) && g.match(r))) &&
     matchesQuery(r)
   );
 }
@@ -945,14 +971,46 @@ function updateStatusLabel(){
     : STATUS_GROUPS.filter(g=>S.stats.has(g.key)).map(g=>g.label).join(" + ");
 }
 
+/* ------------------------------------------------------------- duration */
+function buildDurations(){
+  const el=document.getElementById("durList");
+  const counts={};
+  for(const g of DURATION_GROUPS) counts[g.key]=0;
+  if(S.data) for(const r of S.data.rows){
+    const g=DURATION_GROUPS.find(g=>g.match(r));
+    if(g) counts[g.key]++;
+  }
+  el.innerHTML = DURATION_GROUPS.map(g=>`
+    <div class="loc-item${S.durs.has(g.key)?" on":""}" data-k="${g.key}">
+      <span class="cbx">${S.durs.has(g.key)?"✓":""}</span>
+      <span>${g.label}</span>
+      <span class="n">${(counts[g.key]||0).toLocaleString()}</span>
+    </div>`).join("");
+  el.querySelectorAll(".loc-item").forEach(it=>it.onclick=()=>{
+    const k=it.dataset.k;
+    S.durs.has(k) ? S.durs.delete(k) : S.durs.add(k);
+    if(S.durs.size===DURATION_GROUPS.length) S.durs.clear(); // all checked == no filter
+    S.page=1; buildDurations(); updateDurationLabel(); render();
+  });
+}
+function updateDurationLabel(){
+  const el=document.getElementById("durLabel");
+  const picked=DURATION_GROUPS.filter(g=>S.durs.has(g.key));
+  el.textContent = picked.length===0 ? "Any Duration"
+    : picked.length===1 ? picked[0].label
+    : `${picked.length} durations`;
+}
+
 /* ------------------------------------------------------------- popovers */
 function closePops(){
   document.getElementById("datePop").classList.remove("open");
   document.getElementById("locPop").classList.remove("open");
   document.getElementById("statusPop").classList.remove("open");
+  document.getElementById("durPop").classList.remove("open");
   document.getElementById("dateBtn").setAttribute("aria-expanded","false");
   document.getElementById("locBtn").setAttribute("aria-expanded","false");
   document.getElementById("statusBtn").setAttribute("aria-expanded","false");
+  document.getElementById("durBtn").setAttribute("aria-expanded","false");
 }
 function toggle(popId, btnId){
   const pop=document.getElementById(popId), btn=document.getElementById(btnId);
@@ -963,6 +1021,7 @@ function toggle(popId, btnId){
 document.getElementById("dateBtn").onclick = e => { e.stopPropagation(); toggle("datePop","dateBtn"); };
 document.getElementById("locBtn").onclick  = e => { e.stopPropagation(); toggle("locPop","locBtn"); };
 document.getElementById("statusBtn").onclick = e => { e.stopPropagation(); toggle("statusPop","statusBtn"); };
+document.getElementById("durBtn").onclick = e => { e.stopPropagation(); toggle("durPop","durBtn"); };
 document.getElementById("exportBtn").onclick = e => { e.stopPropagation(); closePops(); exportCsv(); };
 
 const searchBox = document.getElementById("searchBox");
@@ -982,6 +1041,7 @@ searchClear.onclick = e => {
 document.getElementById("datePop").onclick = e => e.stopPropagation();
 document.getElementById("locPop").onclick  = e => e.stopPropagation();
 document.getElementById("statusPop").onclick = e => e.stopPropagation();
+document.getElementById("durPop").onclick = e => e.stopPropagation();
 document.addEventListener("click", closePops);
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
