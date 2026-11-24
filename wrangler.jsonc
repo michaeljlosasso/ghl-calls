@@ -8,6 +8,11 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },
+  // Production is ghl-calls.llmedia.info behind Cloudflare Access. workers.dev
+  // must stay off: it would serve the call log to anyone with the URL.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "ghl-calls.llmedia.info", "custom_domain": true }],
   // 12:45 UTC = 08:45 EDT / 07:45 EST — always just after the ~07:17 ET
   // ghl.calls sync, in either half of the year.
   "triggers": { "crons": ["45 12 * * *"] },

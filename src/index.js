@@ -18,6 +18,11 @@
  * behind it, resolves any contact_id it has not seen before against the GHL
  * contacts API, and writes the result to ghl.contacts.
  *
+ * The same cron refreshes each caller's GHL "Disposition" custom field into
+ * ghl.contact_dispositions (append-only, newest row wins): every inbound caller
+ * from the last DISPO_REFRESH_DAYS days, plus any caller never looked up.
+ * Dispositions keep changing after the call, so unlike names they are re-read.
+ *
  * Secrets for that path:
  *   GCP_SA_KEY_WRITE    — service account allowed to insert into ghl.contacts
  *   CONTACTS_SYNC_KEY   — shared secret for the manual POST /api/sync-contacts
@@ -29,12 +34,17 @@ const CACHE_SECONDS = 3600;
 // without this a colo that cached the old shape keeps serving it for up to an
 // hour -- new HTML against an old payload, which is how the Name column ended
 // up empty for everyone whose nearest colo was already warm.
-const PAYLOAD_VERSION = 2;
+const PAYLOAD_VERSION = 3;
 const TOKEN_SCOPE = "https://www.googleapis.com/auth/bigquery.readonly";
 const TOKEN_SCOPE_WRITE = "https://www.googleapis.com/auth/bigquery";
 const SYNC_MAX_CONTACTS = 300;   // per run; ~40 new contacts/day, so ample
 const SYNC_CONCURRENCY = 6;
 const SYNC_LOOKBACK_DAYS = 14;   // resilience if the cron misses a few nights
+// Dispositions: ~240 inbound callers per 30 days. Each run costs one GHL call
+// per contact plus one per sub-account (to find its Disposition field id), so
+// the cap keeps a run well inside the Worker's subrequest limit.
+const DISPO_REFRESH_DAYS = 30;
+const DISPO_MAX_CONTACTS = 450;
 
 /* ------------------------------------------------------------------ auth */
 
@@ -198,12 +208,22 @@ const SQL_CONTACTS = `
   WHERE status = 'ok' AND (first_name IS NOT NULL OR last_name IS NOT NULL)
 `;
 
+// Current Disposition per caller. Blank, purged and no-field contacts are
+// left out, so absent means "no disposition" and the cell shows a dash.
+const SQL_DISPOSITIONS = `
+  SELECT contact_id, ANY_VALUE(disposition) AS disposition
+  FROM \`${PROJECT}.ghl.vw_contact_dispositions_latest\`
+  WHERE status = 'ok' AND disposition IS NOT NULL AND disposition != ''
+  GROUP BY contact_id
+`;
+
 async function buildPayload(env) {
-  const [calls, locations, meta, contacts] = await Promise.all([
+  const [calls, locations, meta, contacts, dispos] = await Promise.all([
     bq(env, SQL_CALLS),
     bq(env, SQL_LOCATIONS),
     bq(env, SQL_META),
     bq(env, SQL_CONTACTS),
+    bq(env, SQL_DISPOSITIONS),
   ]);
 
   const locMap = {};
@@ -223,6 +243,8 @@ async function buildPayload(env) {
     locations: locMap,
     // { contact_id: [first, last] } -- only contacts we actually resolved
     contacts: Object.fromEntries(contacts.rows.map((r) => [r[0], [r[1] || "", r[2] || ""]])),
+    // { contact_id: "Appointment Booked" } -- only contacts with a value
+    dispositions: Object.fromEntries(dispos.rows.map((r) => [r[0], r[1]])),
     fields: ["id", "loc", "date", "time", "status", "from", "to", "dur", "cid"],
     // [message_id, location_id, YYYY-MM-DD, HH:MM:SS, status, from, to, seconds, contact_id]
     rows: calls.rows.map((r) => [
@@ -339,6 +361,107 @@ async function syncContactNames(env) {
   };
 }
 
+/* --------------------------------------------------------- dispositions */
+
+// Callers due a (re)read: anyone never read, then recent callers whose last
+// read is older than ~a day. Purged contacts are never re-asked.
+const SQL_PENDING_DISPOSITIONS = `
+  WITH callers AS (
+    SELECT location_id, contact_id, MAX(call_date_et) AS last_call
+    FROM \`${PROJECT}.ghl.calls\`
+    WHERE direction = 'inbound' AND contact_id IS NOT NULL
+      AND REGEXP_CONTAINS(from_number, r'^\\+?[0-9]')
+    GROUP BY location_id, contact_id
+  )
+  SELECT c.location_id, c.contact_id, t.pit_token
+  FROM callers c
+  JOIN (SELECT location_id, pit_token FROM \`${PROJECT}.ghl.location_tokens\`
+        WHERE pit_token IS NOT NULL
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY location_id ORDER BY created_at DESC) = 1) t
+    USING (location_id)
+  LEFT JOIN \`${PROJECT}.ghl.vw_contact_dispositions_latest\` d USING (location_id, contact_id)
+  WHERE d.contact_id IS NULL
+     OR (d.status != 'missing'
+         AND c.last_call >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL ${DISPO_REFRESH_DAYS} DAY)
+         AND d.synced_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 20 HOUR))
+  ORDER BY d.contact_id IS NULL DESC, c.last_call DESC
+  LIMIT ${DISPO_MAX_CONTACTS}
+`;
+
+const GHL_HEADERS = (pit) => ({ Authorization: `Bearer ${pit}`, Version: "2021-07-28", Accept: "application/json" });
+
+// The Disposition field has a different id in every sub-account. Returns the
+// id, null when the sub-account has no such field, or undefined on an error.
+async function dispositionFieldId(locationId, pit) {
+  const resp = await fetch(`https://services.leadconnectorhq.com/locations/${locationId}/customFields`,
+    { headers: GHL_HEADERS(pit) });
+  if (!resp.ok) return undefined;
+  const fields = (await resp.json()).customFields || [];
+  const name = (f) => String(f.name || "").trim().toLowerCase();
+  const f = fields.find((x) => name(x) === "disposition") || fields.find((x) => name(x).includes("disposition"));
+  return f ? f.id : null;
+}
+
+// Same 200 / 400-not-found / transient contract as fetchContactName.
+async function fetchDisposition(contactId, pit, fieldId) {
+  const resp = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, { headers: GHL_HEADERS(pit) });
+  if (resp.status === 200) {
+    const c = (await resp.json()).contact || {};
+    let v = ((c.customFields || []).find((x) => x.id === fieldId) || {}).value;
+    if (Array.isArray(v)) v = v.join(", ");
+    v = v == null ? "" : String(v).trim();
+    return { status: "ok", disposition: v || null };
+  }
+  if (resp.status === 400 || resp.status === 404) {
+    if ((await resp.text()).toLowerCase().includes("not found")) return { status: "missing", disposition: null };
+  }
+  return null;
+}
+
+async function syncDispositions(env) {
+  const pending = await bq(env, SQL_PENDING_DISPOSITIONS);
+  if (!pending.rows.length) return { pending: 0, inserted: 0 };
+
+  const tokens = {};
+  for (const [loc, , pit] of pending.rows) tokens[loc] = pit;
+  const fieldIds = {};
+  await mapPool(Object.keys(tokens), SYNC_CONCURRENCY, async (loc) => {
+    fieldIds[loc] = await dispositionFieldId(loc, tokens[loc]);
+  });
+
+  const results = await mapPool(pending.rows, SYNC_CONCURRENCY, async ([locationId, contactId, pit]) => {
+    const fid = fieldIds[locationId];
+    if (fid === undefined) return null;                       // field lookup failed: retry next run
+    if (fid === null) return { locationId, contactId, status: "no_field", disposition: null };
+    const r = await fetchDisposition(contactId, pit, fid);
+    return r && { locationId, contactId, ...r };
+  });
+  const got = results.filter(Boolean);
+  if (!got.length) return { pending: pending.rows.length, inserted: 0 };
+
+  // Append-only by design (a new snapshot each read), so no insertId dedupe.
+  const now = new Date().toISOString();
+  const token = await getAccessToken(env, "GCP_SA_KEY_WRITE", TOKEN_SCOPE_WRITE);
+  const resp = await fetch(
+    `https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT}/datasets/ghl/tables/contact_dispositions/insertAll`,
+    { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ skipInvalidRows: false, rows: got.map((g) => ({ json: {
+        location_id: g.locationId, contact_id: g.contactId, disposition: g.disposition,
+        status: g.status, synced_at: now } })) }) }
+  );
+  const out = await resp.json();
+  if (!resp.ok || out.insertErrors) {
+    throw new Error(`dispositions insert failed: ${resp.status} ${JSON.stringify(out).slice(0, 400)}`);
+  }
+  return {
+    pending: pending.rows.length,
+    inserted: got.length,
+    with_value: got.filter((g) => g.disposition).length,
+    missing: got.filter((g) => g.status === "missing").length,
+    skipped: pending.rows.length - got.length,
+  };
+}
+
 /* --------------------------------------------------------------- handler */
 
 const JSON_HEADERS = {
@@ -351,11 +474,14 @@ export default {
   // Runs just after the nightly ghl.calls sync so new calls arrive with their
   // caller name already resolved.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      syncContactNames(env)
+    ctx.waitUntil((async () => {
+      await syncContactNames(env)
         .then((s) => console.log("contact-name sync", JSON.stringify(s)))
-        .catch((e) => console.error("contact-name sync failed:", e && e.message ? e.message : e))
-    );
+        .catch((e) => console.error("contact-name sync failed:", e && e.message ? e.message : e));
+      await syncDispositions(env)
+        .then((s) => console.log("disposition sync", JSON.stringify(s)))
+        .catch((e) => console.error("disposition sync failed:", e && e.message ? e.message : e));
+    })());
   },
 
   async fetch(request, env, ctx) {
@@ -379,8 +505,9 @@ export default {
         return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: JSON_HEADERS });
       }
       try {
-        const stats = await syncContactNames(env);
-        return new Response(JSON.stringify({ ok: true, ...stats }), { headers: JSON_HEADERS });
+        const names = await syncContactNames(env);
+        const dispositions = await syncDispositions(env);
+        return new Response(JSON.stringify({ ok: true, names, dispositions }), { headers: JSON_HEADERS });
       } catch (err) {
         return new Response(JSON.stringify({ error: String(err && err.message ? err.message : err) }),
           { status: 500, headers: JSON_HEADERS });

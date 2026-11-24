@@ -485,6 +485,8 @@ async function load(){
       r.last  = nm ? nm[1] : "";
       r.name  = (r.first + " " + r.last).trim();
       r.nameSearch = r.name.toLowerCase();
+      // The contact's GHL "Disposition" custom field, refreshed nightly.
+      r.dispo = (j.dispositions && r[F.CID] && j.dispositions[r[F.CID]]) || "";
     }
     const [a,b] = rangeFor(S.preset);
     S.start=a; S.end=b;
@@ -703,6 +705,7 @@ function sortRows(rows){
     if(k==="date"){ va=a[F.DATE]+a[F.TIME]; vb=b[F.DATE]+b[F.TIME]; }
     else if(k==="loc"){ va=names[a[F.LOC]]||""; vb=names[b[F.LOC]]||""; }
     else if(k==="name"){ va=a.name||"￿"; vb=b.name||"￿"; }   // blanks last
+    else if(k==="dispo"){ va=a.dispo||"￿"; vb=b.dispo||"￿"; }
     else if(k==="dur"){ va=a[F.DUR]??-1; vb=b[F.DUR]??-1; }
     else { va=a[F[k.toUpperCase()]]||""; vb=b[F[k.toUpperCase()]]||""; }
     return va<vb?-d:va>vb?d:0;
@@ -727,7 +730,8 @@ function table(rows){
       <td class="mono">${fmtPhone(r[F.TO])}</td>
       <td>${statusPill(r)}</td>
       <td class="mono">${r[F.DUR]==null?"—":fmtDur(r[F.DUR])}</td>
-    </tr>`).join("") : `<tr><td colspan="7" class="empty">No calls match these filters.</td></tr>`;
+      <td>${r.dispo ? esc(r.dispo) : '<span class="no-name">—</span>'}</td>
+    </tr>`).join("") : `<tr><td colspan="8" class="empty">No calls match these filters.</td></tr>`;
 
   return `<div class="card" style="margin-top:14px">
     <div class="eyebrow">Call Detail</div>
@@ -743,6 +747,7 @@ function table(rows){
           <th data-k="to">Routed To${arrow("to")}</th>
           <th data-k="status">Status${arrow("status")}</th>
           <th data-k="dur">Duration${arrow("dur")}</th>
+          <th data-k="dispo">Disposition${arrow("dispo")}</th>
         </tr></thead>
         <tbody>${body}</tbody>
       </table>
@@ -798,7 +803,7 @@ function exportCsv(){
   const names = S.data.locations;
 
   const header = ["Date","Time","Location","First Name","Last Name","From","From (digits)",
-                  "Routed To","Status","GHL Status","Duration (sec)","Duration","GHL Contact"];
+                  "Routed To","Status","GHL Status","Duration (sec)","Duration","Disposition","GHL Contact"];
   const lines = [header.map(csvCell).join(",")];
   for(const r of rows){
     lines.push([
@@ -813,6 +818,7 @@ function exportCsv(){
       r[F.STATUS] || "",
       r[F.DUR] == null ? "" : r[F.DUR],
       r[F.DUR] == null ? "" : fmtDur(r[F.DUR]),
+      r.dispo,
       r[F.CID] ? `${GHL_BASE}/${r[F.LOC]}/contacts/detail/${r[F.CID]}` : ""
     ].map(csvCell).join(","));
   }
